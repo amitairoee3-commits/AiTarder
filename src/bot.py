@@ -14,7 +14,7 @@ from src.auto_optimizer import AutoOptimizer
 from src.hive_mind import HiveMind
 
 class LiveBot:
-    def __init__(self, symbol='BTC/USDT', trade_size=0.001, mode='hive_mind'):
+    def __init__(self, symbol='BTC/USDT', trade_budget_usdt=10.0, mode='hive_mind', require_approval=True):
         self.exchange = ExchangeHandler()
         self.whale_tracker = WhaleTracker()
         self.news_scraper = NewsScraper()
@@ -23,10 +23,9 @@ class LiveBot:
         self.hive_mind = HiveMind()
 
         self.symbol = symbol
-        self.trade_size = trade_size
-
-        # mode can be 'ai_strategy_only', 'ml_only', 'hybrid', or 'hive_mind'
+        self.trade_budget_usdt = trade_budget_usdt
         self.mode = mode
+        self.require_approval = require_approval
 
         self.is_running = False
         self.strategy_code = None
@@ -35,6 +34,9 @@ class LiveBot:
         self.current_live_position = 'FLAT'
         self.latest_news_sentiment = 0.0
         self.latest_hive_mind_decision = None
+
+        # Approval System State
+        self.pending_trade = None
 
     def load_strategy(self, strategy_code: str):
         self.strategy_code = strategy_code
@@ -86,17 +88,35 @@ class LiveBot:
 
         while self.is_running:
             try:
-                self._run_cycle()
-                time.sleep(60)
+                # If there's a pending trade, skip the cycle and wait for user input
+                if not self.pending_trade:
+                    self._run_cycle()
+                time.sleep(10) # Check more frequently so approvals feel snappy
             except KeyboardInterrupt:
                 self.stop()
             except Exception as e:
                 print(f"[{datetime.now()}] Unexpected error in bot loop: {e}")
-                time.sleep(60)
+                time.sleep(10)
 
     def stop(self):
         self.is_running = False
         print(f"[{datetime.now()}] Live Bot STOPPED.")
+
+    def approve_pending_trade(self):
+        """Called by the UI to execute a pending trade."""
+        if self.pending_trade:
+            self._execute_trade(self.pending_trade['target_state'], self.pending_trade['size'])
+            self.pending_trade = None
+            return True
+        return False
+
+    def reject_pending_trade(self):
+        """Called by the UI to reject a pending trade."""
+        if self.pending_trade:
+            print(f"[{datetime.now()}] User rejected pending trade: {self.pending_trade['target_state']}")
+            self.pending_trade = None
+            return True
+        return False
 
     def _run_cycle(self):
         print(f"\n[{datetime.now()}] Running cycle...")
@@ -116,9 +136,12 @@ class LiveBot:
 
         balance_info = self.exchange.get_balance()
         usdt_balance = balance_info.get('USDT', {}).get('free', 0.0) if "error" not in balance_info else 0.0
+        current_price = df['close'].iloc[-1]
 
         final_decision = 'FLAT'
-        dynamic_trade_size = self.trade_size
+
+        # Convert USDT budget to symbol amount (e.g., how much BTC is $10?)
+        trade_amount = self.trade_budget_usdt / current_price if current_price > 0 else 0
 
         if self.mode == 'hive_mind':
             print("Consulting the Hive-Mind Hedge Fund Committee...")
@@ -126,13 +149,7 @@ class LiveBot:
             self.latest_hive_mind_decision = decision
 
             if decision and "error" not in decision:
-                print(f"  -> Quant: {decision.get('quant_analysis')}")
-                print(f"  -> OnChain: {decision.get('onchain_analysis')}")
-                print(f"  -> Macro: {decision.get('macro_analysis')}")
-                print(f"  -> CRO Decision: {decision.get('cro_decision')}")
-
                 action = decision.get("action", "HOLD")
-                fraction = decision.get("trade_fraction", 0.0)
 
                 if action == "BUY":
                     final_decision = 'LONG'
@@ -140,9 +157,7 @@ class LiveBot:
                     final_decision = 'SHORT'
                 elif action == "HOLD":
                     final_decision = self.current_live_position
-
             else:
-                print(f"  -> Hive-Mind Error/Hold: {decision}")
                 final_decision = self.current_live_position
 
         else:
@@ -192,23 +207,34 @@ class LiveBot:
                 else:
                     final_decision = self.current_live_position
 
-        self._execute_trade(final_decision, dynamic_trade_size)
+        if final_decision != self.current_live_position:
+            if self.require_approval:
+                print(f"[{datetime.now()}] Heads up: Bot wants to change position to {final_decision}. Waiting for approval.")
+                self.pending_trade = {
+                    "target_state": final_decision,
+                    "size": trade_amount,
+                    "timestamp": datetime.now()
+                }
+            else:
+                self._execute_trade(final_decision, trade_amount)
+        else:
+            print(f"[{datetime.now()}] Decision: HOLD.")
 
     def _execute_trade(self, target_state, size):
         if target_state == 'LONG' and self.current_live_position != 'LONG':
-            print(f"[{datetime.now()}] Decision: BUY. Executing LIVE market order for {size}...")
+            print(f"[{datetime.now()}] Executing LIVE market BUY order for {size} {self.symbol}...")
             res = self.exchange.create_market_buy_order(self.symbol, size)
             if "error" not in str(res).lower():
                 self.current_live_position = 'LONG'
 
         elif target_state == 'SHORT' and self.current_live_position != 'SHORT':
-            print(f"[{datetime.now()}] Decision: SELL. Executing LIVE market order for {size}...")
+            print(f"[{datetime.now()}] Executing LIVE market SELL order for {size} {self.symbol}...")
             res = self.exchange.create_market_sell_order(self.symbol, size)
             if "error" not in str(res).lower():
                 self.current_live_position = 'SHORT'
 
         elif target_state == 'FLAT' and self.current_live_position != 'FLAT':
-            print(f"[{datetime.now()}] Decision: CLOSE. Executing LIVE market order...")
+            print(f"[{datetime.now()}] Executing LIVE market CLOSE order...")
             if self.current_live_position == 'LONG':
                 res = self.exchange.create_market_sell_order(self.symbol, size)
             else:

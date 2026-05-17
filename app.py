@@ -3,6 +3,7 @@ import pandas as pd
 import threading
 import time
 import json
+from datetime import datetime
 
 from src.exchange import ExchangeHandler
 from src.whale_alert import WhaleTracker
@@ -49,12 +50,22 @@ if page == "Hive-Mind Dashboard (Live)":
     status_text = "🟢 RUNNING" if is_running else "🔴 STOPPED"
     st.write(f"**Status:** {status_text}")
 
-    col_mode, col_btn1, col_btn2 = st.columns([2, 1, 1])
+    col_mode, col_budget, col_app, col_btn1, col_btn2 = st.columns([2, 1, 1, 1, 1])
 
     with col_mode:
         mode = st.selectbox("Operating Mode", ['hive_mind', 'hybrid', 'ai_strategy_only', 'ml_only'], index=0, disabled=is_running)
         if not is_running:
             st.session_state.live_bot.mode = mode
+
+    with col_budget:
+        budget = st.number_input("Budget (USDT)", min_value=1.0, value=10.0, disabled=is_running)
+        if not is_running:
+            st.session_state.live_bot.trade_budget_usdt = budget
+
+    with col_app:
+        require_approval = st.checkbox("Require Approval", value=True, disabled=is_running)
+        if not is_running:
+            st.session_state.live_bot.require_approval = require_approval
 
     with col_btn1:
         if st.button("Start Bot"):
@@ -75,6 +86,27 @@ if page == "Hive-Mind Dashboard (Live)":
 
     st.divider()
 
+    # Pending Approvals Section
+    if st.session_state.live_bot.pending_trade:
+        st.error("🚨 Heads up! The bot wants to execute a trade.")
+        trade = st.session_state.live_bot.pending_trade
+        st.info(f"Target Position: **{trade['target_state']}** | Asset Amount: **{trade['size']:.6f}**")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("✅ Approve & Execute"):
+                st.session_state.live_bot.approve_pending_trade()
+                st.success("Trade executed!")
+                time.sleep(1)
+                st.rerun()
+        with c2:
+            if st.button("❌ Reject Trade"):
+                st.session_state.live_bot.reject_pending_trade()
+                st.warning("Trade rejected.")
+                time.sleep(1)
+                st.rerun()
+        st.divider()
+
     if mode == 'hive_mind':
         st.subheader("🏛️ Hedge Fund Committee (Live Feed)")
         if st.button("Refresh Committee Log"):
@@ -82,7 +114,7 @@ if page == "Hive-Mind Dashboard (Live)":
 
         decision = st.session_state.live_bot.latest_hive_mind_decision
         if decision and "error" not in decision:
-            st.markdown(f"### Current Action: **{decision.get('action')}** (Size: {decision.get('trade_fraction')})")
+            st.markdown(f"### Current Action: **{decision.get('action')}**")
 
             col_q, col_o, col_m = st.columns(3)
             with col_q:
@@ -145,7 +177,6 @@ elif page == "Market Pulse (Whales & News)":
                           delta="Bullish" if agg_sentiment > 0 else "Bearish")
 
                 for n in news[:5]:
-                    color = "green" if n['sentiment'] > 0 else "red" if n['sentiment'] < 0 else "gray"
                     st.markdown(f"**[{n['sentiment']:.2f}]** [{n['title']}]({n['link']})")
 
     with col2:
