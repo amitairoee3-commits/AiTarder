@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import threading
 import time
+import json
 
 from src.exchange import ExchangeHandler
 from src.whale_alert import WhaleTracker
@@ -10,8 +11,8 @@ from src.backtester import Backtester
 from src.bot import LiveBot
 from src.news_scraper import NewsScraper
 
-st.set_page_config(page_title="AiTrader", layout="wide")
-st.title("🤖 AiTrader - Autonomous ML Crypto Bot")
+st.set_page_config(page_title="Celsor Hive-Mind", layout="wide")
+st.title("🧠 Celsor - Multi-Agent Hive-Mind Trading")
 
 # Initialize Session State
 if "strategy_code" not in st.session_state:
@@ -23,7 +24,7 @@ if "bot_thread" not in st.session_state:
 
 # Sidebar
 st.sidebar.header("Navigation")
-page = st.sidebar.radio("Go to", ["Dashboard (Live)", "Strategy Lab", "Market Pulse (Whales & News)"])
+page = st.sidebar.radio("Go to", ["Hive-Mind Dashboard (Live)", "Strategy Lab", "Market Pulse (Whales & News)"])
 
 exchange = ExchangeHandler()
 whale_tracker = WhaleTracker()
@@ -31,7 +32,7 @@ ai_gen = AIGenerator()
 backtester = Backtester()
 news_scraper = NewsScraper()
 
-if page == "Dashboard (Live)":
+if page == "Hive-Mind Dashboard (Live)":
     st.header("📈 Live Trading Dashboard")
 
     # Balance
@@ -48,20 +49,16 @@ if page == "Dashboard (Live)":
     status_text = "🟢 RUNNING" if is_running else "🔴 STOPPED"
     st.write(f"**Status:** {status_text}")
 
-    col_mode, col_btn1, col_btn2, col_btn3 = st.columns([2, 1, 1, 1])
+    col_mode, col_btn1, col_btn2 = st.columns([2, 1, 1])
 
     with col_mode:
-        mode = st.selectbox("Operating Mode", ['hybrid', 'ai_strategy_only', 'ml_only'], index=0, disabled=is_running)
+        mode = st.selectbox("Operating Mode", ['hive_mind', 'hybrid', 'ai_strategy_only', 'ml_only'], index=0, disabled=is_running)
         if not is_running:
             st.session_state.live_bot.mode = mode
 
     with col_btn1:
-        if st.button("Start Bot (Manual Strategy)"):
-            if not st.session_state.strategy_code and mode != 'ml_only':
-                st.error("No strategy loaded! Go to Strategy Lab.")
-            elif not is_running:
-                if mode != 'ml_only':
-                    st.session_state.live_bot.load_strategy(st.session_state.strategy_code)
+        if st.button("Start Bot"):
+            if not is_running:
                 st.session_state.bot_thread = threading.Thread(target=st.session_state.live_bot.start, daemon=True)
                 st.session_state.bot_thread.start()
                 st.success("Bot started!")
@@ -69,18 +66,6 @@ if page == "Dashboard (Live)":
                 st.rerun()
 
     with col_btn2:
-        if st.button("Start Auto-Pilot"):
-            if not is_running:
-                st.info("Initiating autonomous optimization. This takes a minute...")
-                # The bot will auto-optimize within its start routine if no strategy is loaded
-                st.session_state.live_bot.active_strategy_class = None
-                st.session_state.bot_thread = threading.Thread(target=st.session_state.live_bot.start, daemon=True)
-                st.session_state.bot_thread.start()
-                st.success("Auto-Pilot engaged!")
-                time.sleep(1)
-                st.rerun()
-
-    with col_btn3:
         if st.button("Stop Bot"):
             if is_running:
                 st.session_state.live_bot.stop()
@@ -88,8 +73,28 @@ if page == "Dashboard (Live)":
                 time.sleep(1)
                 st.rerun()
 
-    if is_running:
-        st.info("Bot is running in the background. Check your terminal for live trade logs and ML prediction probabilities.")
+    st.divider()
+
+    if mode == 'hive_mind':
+        st.subheader("🏛️ Hedge Fund Committee (Live Feed)")
+        if st.button("Refresh Committee Log"):
+            st.rerun()
+
+        decision = st.session_state.live_bot.latest_hive_mind_decision
+        if decision and "error" not in decision:
+            st.markdown(f"### Current Action: **{decision.get('action')}** (Size: {decision.get('trade_fraction')})")
+
+            col_q, col_o, col_m = st.columns(3)
+            with col_q:
+                st.info(f"**👨‍💻 Technical Quant:**\n{decision.get('quant_analysis')}")
+            with col_o:
+                st.warning(f"**🕵️ On-Chain Sleuth:**\n{decision.get('onchain_analysis')}")
+            with col_m:
+                st.success(f"**📰 Macro Analyst:**\n{decision.get('macro_analysis')}")
+
+            st.error(f"**⚖️ Chief Risk Officer (Final Decision):**\n{decision.get('cro_decision')}")
+        else:
+            st.write("Waiting for the committee's first cycle... (Check terminal for logs)")
 
 elif page == "Strategy Lab":
     st.header("🧪 Strategy Lab")
