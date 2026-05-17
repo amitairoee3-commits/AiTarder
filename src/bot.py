@@ -8,20 +8,30 @@ from datetime import datetime
 import backtrader as bt
 from src.exchange import ExchangeHandler
 from src.whale_alert import WhaleTracker
+from src.news_scraper import NewsScraper
+from src.ml_predictor import MLPredictor
+from src.auto_optimizer import AutoOptimizer
 
 class LiveBot:
-    def __init__(self, symbol='BTC/USDT', trade_size=0.001):
+    def __init__(self, symbol='BTC/USDT', trade_size=0.001, mode='hybrid'):
         self.exchange = ExchangeHandler()
         self.whale_tracker = WhaleTracker()
+        self.news_scraper = NewsScraper()
+        self.ml_predictor = MLPredictor()
+        self.optimizer = AutoOptimizer(self.exchange)
+
         self.symbol = symbol
         self.trade_size = trade_size
+
+        # mode can be 'ai_strategy_only', 'ml_only', or 'hybrid' (requires agreement)
+        self.mode = mode
+
         self.is_running = False
         self.strategy_code = None
         self.active_strategy_class = None
 
-        # Track our actual live position state so we don't spam orders
-        # State can be 'FLAT', 'LONG', or 'SHORT'
         self.current_live_position = 'FLAT'
+        self.latest_news_sentiment = 0.0
 
     def load_strategy(self, strategy_code: str):
         self.strategy_code = strategy_code
@@ -36,7 +46,7 @@ class LiveBot:
             spec.loader.exec_module(dynamic_module)
             self.active_strategy_class = getattr(dynamic_module, "AIStrategy")
             print(f"[{datetime.now()}] Strategy successfully loaded for live trading.")
-            self.current_live_position = 'FLAT' # Reset position tracking when new strategy loads
+            self.current_live_position = 'FLAT'
             return True
         except Exception as e:
             print(f"[{datetime.now()}] Error loading live strategy: {e}")
@@ -45,13 +55,32 @@ class LiveBot:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
+    def auto_optimize(self):
+        """Autonomously finds and loads the best strategy."""
+        best = self.optimizer.optimize(symbol=self.symbol, timeframe='1h', limit=500)
+        if best:
+            self.load_strategy(best['code'])
+            return True
+        return False
+
     def start(self):
-        if not self.active_strategy_class:
-            print("Cannot start bot without an active strategy loaded.")
-            return
+        if self.mode != 'ml_only' and not self.active_strategy_class:
+            print("Attempting to auto-optimize a strategy before starting...")
+            success = self.auto_optimize()
+            if not success:
+                print("Cannot start bot. Optimization failed and no strategy loaded.")
+                return
 
         self.is_running = True
-        print(f"[{datetime.now()}] Live Bot STARTED. Trading {self.symbol}.")
+        print(f"[{datetime.now()}] Live Bot STARTED in {self.mode} mode. Trading {self.symbol}.")
+
+        # Initial ML Training
+        print("Fetching historical data for ML training...")
+        train_df = self.exchange.fetch_ohlcv(self.symbol, timeframe='1h', limit=500)
+        if not train_df.empty:
+            train_df['whale_volume'] = 0.0 # Mock historical
+            self.latest_news_sentiment = self.news_scraper.get_aggregated_sentiment()
+            self.ml_predictor.train(train_df, self.latest_news_sentiment)
 
         while self.is_running:
             try:
@@ -68,76 +97,98 @@ class LiveBot:
         print(f"[{datetime.now()}] Live Bot STOPPED.")
 
     def _run_cycle(self):
-        print(f"[{datetime.now()}] Running cycle...")
+        print(f"\n[{datetime.now()}] Running cycle...")
 
-        # 1. Fetch Latest Market Data
         df = self.exchange.fetch_ohlcv(self.symbol, timeframe='1m', limit=100)
         if df.empty:
             print("No market data fetched. Skipping cycle.")
             return
 
-        # 2. Fetch Whale Data and merge into Pandas DataFrame
-        # We append a 'whale_volume' column so the AI strategy can use it
+        # Update external data
         whales = self.whale_tracker.get_recent_transactions()
         df['whale_volume'] = 0.0
         if whales:
-            print(f"[{datetime.now()}] Detected {len(whales)} recent large on-chain transactions.")
-            # For simplicity, we just aggregate total whale volume in the last minute
             total_whale_vol = sum(tx.get('amount_usd', 0) for tx in whales)
-            # Assign it to the latest bar
             df.iloc[-1, df.columns.get_loc('whale_volume')] = total_whale_vol
 
-        # 3. Evaluate AI Strategy on Live Data using Backtrader Cerebro
-        cerebro = bt.Cerebro()
-        cerebro.addstrategy(self.active_strategy_class)
+        self.latest_news_sentiment = self.news_scraper.get_aggregated_sentiment()
 
-        # We need to extend PandasData to recognize the new whale_volume column
-        class WhalePandasData(bt.feeds.PandasData):
-            lines = ('whale_volume',)
-            params = (('whale_volume', -1),)
+        # 1. Get ML Prediction (1 = UP, 0 = DOWN)
+        ml_pred, ml_prob = 0, 0.0
+        if self.ml_predictor.is_trained:
+            ml_pred, ml_prob = self.ml_predictor.predict(df, self.latest_news_sentiment)
 
-        data = WhalePandasData(dataname=df)
-        cerebro.adddata(data)
+        # 2. Get AI Strategy Signal
+        strategy_target_state = 'FLAT'
+        if self.active_strategy_class:
+            cerebro = bt.Cerebro()
+            cerebro.addstrategy(self.active_strategy_class)
 
-        try:
-            results = cerebro.run()
-            strat = results[0]
+            class WhalePandasData(bt.feeds.PandasData):
+                lines = ('whale_volume',)
+                params = (('whale_volume', -1),)
 
-            # Determine target position size from backtrader state
-            target_pos_size = strat.broker.getposition(data).size
+            data = WhalePandasData(dataname=df)
+            cerebro.adddata(data)
 
-            target_state = 'FLAT'
-            if target_pos_size > 0:
-                target_state = 'LONG'
-            elif target_pos_size < 0:
-                target_state = 'SHORT'
+            try:
+                results = cerebro.run()
+                strat = results[0]
+                target_pos_size = strat.broker.getposition(data).size
 
-            # Execute ONLY if our target state differs from our current actual live state
-            if target_state == 'LONG' and self.current_live_position != 'LONG':
-                print(f"[{datetime.now()}] AI Strategy Signal: BUY. Executing LIVE market order...")
-                res = self.exchange.create_market_buy_order(self.symbol, self.trade_size)
-                print(f"Order Result: {res}")
-                if "error" not in str(res).lower():
-                    self.current_live_position = 'LONG'
+                if target_pos_size > 0:
+                    strategy_target_state = 'LONG'
+                elif target_pos_size < 0:
+                    strategy_target_state = 'SHORT'
+            except Exception as e:
+                print(f"Error running strategy: {e}")
 
-            elif target_state == 'SHORT' and self.current_live_position != 'SHORT':
-                print(f"[{datetime.now()}] AI Strategy Signal: SELL. Executing LIVE market order...")
-                res = self.exchange.create_market_sell_order(self.symbol, self.trade_size)
-                print(f"Order Result: {res}")
-                if "error" not in str(res).lower():
-                    self.current_live_position = 'SHORT'
+        # 3. Decision Logic based on Mode
+        final_decision = 'FLAT'
 
-            elif target_state == 'FLAT' and self.current_live_position != 'FLAT':
-                print(f"[{datetime.now()}] AI Strategy Signal: CLOSE. Executing LIVE market order...")
-                if self.current_live_position == 'LONG':
-                    res = self.exchange.create_market_sell_order(self.symbol, self.trade_size)
-                else:
-                    res = self.exchange.create_market_buy_order(self.symbol, self.trade_size)
-                print(f"Order Result: {res}")
-                if "error" not in str(res).lower():
-                    self.current_live_position = 'FLAT'
+        print(f"  -> ML Predicts UP prob: {ml_prob:.2f} | Strategy wants: {strategy_target_state}")
+        print(f"  -> News Sentiment: {self.latest_news_sentiment:.2f}")
+
+        if self.mode == 'ai_strategy_only':
+            final_decision = strategy_target_state
+        elif self.mode == 'ml_only':
+            if ml_prob > 0.65:
+                final_decision = 'LONG'
+            elif ml_prob < 0.35:
+                final_decision = 'SHORT'
+        elif self.mode == 'hybrid':
+            # Require agreement between Strategy and ML to enter a trade
+            if strategy_target_state == 'LONG' and ml_prob > 0.55:
+                final_decision = 'LONG'
+            elif strategy_target_state == 'SHORT' and ml_prob < 0.45:
+                final_decision = 'SHORT'
+            # If strategy wants out, respect it regardless of ML
+            elif strategy_target_state == 'FLAT':
+                final_decision = 'FLAT'
             else:
-                print(f"[{datetime.now()}] AI Strategy Signal: HOLD (Already {self.current_live_position}).")
+                final_decision = self.current_live_position # Hold current position if no agreement
 
-        except Exception as e:
-            print(f"[{datetime.now()}] Error executing AI strategy in cycle: {e}")
+        # 4. Execution
+        self._execute_trade(final_decision)
+
+    def _execute_trade(self, target_state):
+        if target_state == 'LONG' and self.current_live_position != 'LONG':
+            print(f"[{datetime.now()}] Decision: BUY. Executing LIVE market order...")
+            res = self.exchange.create_market_buy_order(self.symbol, self.trade_size)
+            if "error" not in str(res).lower():
+                self.current_live_position = 'LONG'
+
+        elif target_state == 'SHORT' and self.current_live_position != 'SHORT':
+            print(f"[{datetime.now()}] Decision: SELL. Executing LIVE market order...")
+            res = self.exchange.create_market_sell_order(self.symbol, self.trade_size)
+            if "error" not in str(res).lower():
+                self.current_live_position = 'SHORT'
+
+        elif target_state == 'FLAT' and self.current_live_position != 'FLAT':
+            print(f"[{datetime.now()}] Decision: CLOSE. Executing LIVE market order...")
+            if self.current_live_position == 'LONG':
+                res = self.exchange.create_market_sell_order(self.symbol, self.trade_size)
+            else:
+                res = self.exchange.create_market_buy_order(self.symbol, self.trade_size)
+            if "error" not in str(res).lower():
+                self.current_live_position = 'FLAT'

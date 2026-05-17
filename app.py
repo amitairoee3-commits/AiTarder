@@ -8,9 +8,10 @@ from src.whale_alert import WhaleTracker
 from src.ai_generator import AIGenerator
 from src.backtester import Backtester
 from src.bot import LiveBot
+from src.news_scraper import NewsScraper
 
 st.set_page_config(page_title="AiTrader", layout="wide")
-st.title("🤖 AiTrader - Autonomous Crypto Trading Bot")
+st.title("🤖 AiTrader - Autonomous ML Crypto Bot")
 
 # Initialize Session State
 if "strategy_code" not in st.session_state:
@@ -22,12 +23,13 @@ if "bot_thread" not in st.session_state:
 
 # Sidebar
 st.sidebar.header("Navigation")
-page = st.sidebar.radio("Go to", ["Dashboard (Live)", "Strategy Lab", "Whale Tracker"])
+page = st.sidebar.radio("Go to", ["Dashboard (Live)", "Strategy Lab", "Market Pulse (Whales & News)"])
 
 exchange = ExchangeHandler()
 whale_tracker = WhaleTracker()
 ai_gen = AIGenerator()
 backtester = Backtester()
+news_scraper = NewsScraper()
 
 if page == "Dashboard (Live)":
     st.header("📈 Live Trading Dashboard")
@@ -41,26 +43,44 @@ if page == "Dashboard (Live)":
         st.metric("Available USDT Balance", f"${usdt_bal:.2f}")
 
     # Bot Status
-    st.subheader("Bot Controls")
+    st.subheader("Autonomous Bot Controls")
     is_running = st.session_state.live_bot.is_running
     status_text = "🟢 RUNNING" if is_running else "🔴 STOPPED"
     st.write(f"**Status:** {status_text}")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Start Bot"):
-            if not st.session_state.strategy_code:
-                st.error("No strategy loaded! Go to Strategy Lab first.")
+    col_mode, col_btn1, col_btn2, col_btn3 = st.columns([2, 1, 1, 1])
+
+    with col_mode:
+        mode = st.selectbox("Operating Mode", ['hybrid', 'ai_strategy_only', 'ml_only'], index=0, disabled=is_running)
+        if not is_running:
+            st.session_state.live_bot.mode = mode
+
+    with col_btn1:
+        if st.button("Start Bot (Manual Strategy)"):
+            if not st.session_state.strategy_code and mode != 'ml_only':
+                st.error("No strategy loaded! Go to Strategy Lab.")
             elif not is_running:
-                st.session_state.live_bot.load_strategy(st.session_state.strategy_code)
-                # Run bot in a background thread so it doesn't block Streamlit UI
+                if mode != 'ml_only':
+                    st.session_state.live_bot.load_strategy(st.session_state.strategy_code)
                 st.session_state.bot_thread = threading.Thread(target=st.session_state.live_bot.start, daemon=True)
                 st.session_state.bot_thread.start()
-                st.success("Bot started successfully in the background!")
+                st.success("Bot started!")
                 time.sleep(1)
                 st.rerun()
 
-    with col2:
+    with col_btn2:
+        if st.button("Start Auto-Pilot"):
+            if not is_running:
+                st.info("Initiating autonomous optimization. This takes a minute...")
+                # The bot will auto-optimize within its start routine if no strategy is loaded
+                st.session_state.live_bot.active_strategy_class = None
+                st.session_state.bot_thread = threading.Thread(target=st.session_state.live_bot.start, daemon=True)
+                st.session_state.bot_thread.start()
+                st.success("Auto-Pilot engaged!")
+                time.sleep(1)
+                st.rerun()
+
+    with col_btn3:
         if st.button("Stop Bot"):
             if is_running:
                 st.session_state.live_bot.stop()
@@ -68,9 +88,12 @@ if page == "Dashboard (Live)":
                 time.sleep(1)
                 st.rerun()
 
+    if is_running:
+        st.info("Bot is running in the background. Check your terminal for live trade logs and ML prediction probabilities.")
+
 elif page == "Strategy Lab":
     st.header("🧪 Strategy Lab")
-    st.markdown("Use natural language to tell the AI what trading strategy to build. It will generate the code and backtest it.")
+    st.markdown("Use natural language to build a strategy. The AI understands basic OHLCV, indicators, and `whale_volume`.")
 
     prompt = st.text_area("Describe your strategy:", "Buy BTC when the 50-day moving average crosses above the 200-day moving average.")
 
@@ -101,17 +124,34 @@ elif page == "Strategy Lab":
                         col3.metric("Max Drawdown", f"{results['max_drawdown']:.2f}%")
                         st.write(f"Total Trades: {results['total_trades']}")
 
-elif page == "Whale Tracker":
-    st.header("🐋 Whale Transaction Tracker")
-    st.markdown("Live feed of massive on-chain transactions moving the markets.")
+elif page == "Market Pulse (Whales & News)":
+    st.header("🌐 Market Pulse")
 
-    if st.button("Refresh Alerts"):
-        with st.spinner("Fetching whale alerts..."):
-            txs = whale_tracker.get_recent_transactions()
-            if not txs:
-                st.info("No recent whale transactions found or API key missing.")
-            else:
-                for tx in txs:
-                    symbol = tx.get('blockchain', 'Unknown').upper()
-                    amount_usd = tx.get('amount_usd', 0)
-                    st.write(f"🚨 **{symbol}** move: **${amount_usd:,.2f}**")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("📰 Live Crypto News & Sentiment")
+        if st.button("Refresh News"):
+            with st.spinner("Scraping news..."):
+                news = news_scraper.fetch_recent_news()
+                agg_sentiment = news_scraper.get_aggregated_sentiment()
+
+                st.metric("Aggregated Market Sentiment", f"{agg_sentiment:.2f}",
+                          delta="Bullish" if agg_sentiment > 0 else "Bearish")
+
+                for n in news[:5]:
+                    color = "green" if n['sentiment'] > 0 else "red" if n['sentiment'] < 0 else "gray"
+                    st.markdown(f"**[{n['sentiment']:.2f}]** [{n['title']}]({n['link']})")
+
+    with col2:
+        st.subheader("🐋 Live Whale Transactions")
+        if st.button("Refresh Whales"):
+            with st.spinner("Fetching whale alerts..."):
+                txs = whale_tracker.get_recent_transactions()
+                if not txs:
+                    st.info("No recent whale transactions found or API key missing.")
+                else:
+                    for tx in txs:
+                        symbol = tx.get('blockchain', 'Unknown').upper()
+                        amount_usd = tx.get('amount_usd', 0)
+                        st.write(f"🚨 **{symbol}** move: **${amount_usd:,.2f}**")
